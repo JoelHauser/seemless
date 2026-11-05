@@ -6,8 +6,8 @@ APIs only; never label it release-ready before in-game checks with both installe
 
 ## State
 
-0.0.1 built (dist/SeamlessSwap-0.0.1.zip, ignored by git), **never run in game**. Not a git repo yet:
-nothing committed or published. Next step: Joel runs docs/TEST-PLAN.md on a test profile.
+0.0.1 built (dist/SeamlessSwap-0.0.1.zip, ignored by git), **never run in game**. Repo https://github.com/JoelHauser/seemless.git (public), first commit 023b197 on main; no release yet.
+Next step: Joel runs docs/TEST-PLAN.md on a test profile.
 
 ## Layout
 
