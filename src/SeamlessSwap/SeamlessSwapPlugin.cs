@@ -24,7 +24,7 @@ namespace SeamlessSwap
     [BepInDependency(BackpackGunSlotGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public sealed class SeamlessSwapPlugin : BaseUnityPlugin
     {
-        public const string PluginGuid = "com.joelhauser.seamlessswap";
+        public const string PluginGuid = "com.mybutthasarash.seamlessswap";
         public const string PluginName = "Seamless Swap";
         public const string PluginVersion = "1.0.0";
 

@@ -35,7 +35,7 @@ Unzip `SeamlessSwap-1.0.0.zip` over your SPT folder. It contains only
 
 ## Remove
 
-Delete `BepInEx/plugins/SeamlessSwap.dll`, and optionally `BepInEx/config/com.joelhauser.seamlessswap.cfg`.
+Delete `BepInEx/plugins/SeamlessSwap.dll`, and optionally `BepInEx/config/com.mybutthasarash.seamlessswap.cfg`.
 The mod stores nothing in your profile.
 
 ## Settings (F12)

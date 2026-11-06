@@ -7,10 +7,10 @@ Patch owners and priorities below were read from Harmony at run time with the re
 
 | Method | Kind | Owner | Purpose |
 |---|---|---|---|
-| `SlotView.CanAccept` | postfix | `com.joelhauser.seamlessswap` | Says yes to the gesture only. Reference checks; no mutation, no notification. |
-| `SlotView.AcceptItem` | prefix | `com.joelhauser.seamlessswap` | Runs the swap and skips the original, for the gesture only. |
-| `Player.SinglePlayerInventoryController.Execute` | prefix | `com.joelhauser.seamlessswap` | For this mod's own operations only (one flag, consumed by the first call): runs them without the controller's one-frame wait, via the same base call, so a swap lands in one frame. Every other operation passes through. |
-| `SearchableItemView.Show` | postfix | `com.joelhauser.seamlessswap` | During a swap only: hides the old container's contents on the body until they've moved. Changes nothing else. |
+| `SlotView.CanAccept` | postfix | `com.mybutthasarash.seamlessswap` | Says yes to the gesture only. Reference checks; no mutation, no notification. |
+| `SlotView.AcceptItem` | prefix | `com.mybutthasarash.seamlessswap` | Runs the swap and skips the original, for the gesture only. |
+| `Player.SinglePlayerInventoryController.Execute` | prefix | `com.mybutthasarash.seamlessswap` | For this mod's own operations only (one flag, consumed by the first call): runs them without the controller's one-frame wait, via the same base call, so a swap lands in one frame. Every other operation passes through. |
+| `SearchableItemView.Show` | postfix | `com.mybutthasarash.seamlessswap` | During a swap only: hides the old container's contents on the body until they've moved. Changes nothing else. |
 
 No priorities, no `before`/`after`: nothing in the overlap depends on order (below). Soft
 dependencies on `com.tyfon.uifixes`, `com.wtt.packnstrap` and `com.fika.core` only order loading.

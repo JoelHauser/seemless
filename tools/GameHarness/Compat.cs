@@ -58,7 +58,7 @@ namespace SeamlessSwap.Harness
                 Enable(packNStrap, "PackNStrap.Patches.IsAtReachablePlacePatch");
             }
 
-            var harmony = new Harmony("com.joelhauser.seamlessswap.harness");
+            var harmony = new Harmony("com.mybutthasarash.seamlessswap.harness");
             harmony.PatchAll(typeof(SlotViewCanAcceptPatch));
             harmony.PatchAll(typeof(SlotViewAcceptItemPatch)); harmony.PatchAll(typeof(Curtain.SearchableItemViewShowPatch)); harmony.PatchAll(typeof(Immediate.ExecutePatch)); Console.WriteLine("  applied Immediate.ExecutePatch on SinglePlayerInventoryController.Execute"); Console.WriteLine("  applied Curtain.SearchableItemViewShowPatch on SearchableItemView.Show"); 
             if (File.Exists(Path.Combine(dir, "BackpackGunSlot.dll")))
