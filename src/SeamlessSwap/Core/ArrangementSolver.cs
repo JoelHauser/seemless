@@ -16,10 +16,17 @@ namespace SeamlessSwap.Core
     ///   B. Everything except fixed items may move; original positions are simply tried first.
     /// Only an exhausted stage B proves that no arrangement exists. Node counts, not wall-clock time, limit
     /// the search, so the same input always gives the same result.
+    ///
+    /// Once a layout exists, a third search packs everything tidily for the result's Organized: largest
+    /// first, top left first, unrotated where possible, small pockets filled before large ones so the
+    /// main compartment keeps its free space together. It decides how the bag looks, never whether a
+    /// swap can happen, so it may give up at any point.
     /// </summary>
     public static class ArrangementSolver
     {
         public const long DefaultNodeBudget = 150_000;
+
+        private const long OrganizeNodeBudget = 30_000;
 
         private const int MaxGridWidth = 64;
         private const int MaxMemoEntries = 200_000;
@@ -75,7 +82,7 @@ namespace SeamlessSwap.Core
                 used += stageA.Nodes;
                 if (outcome == SearchOutcome.Found)
                 {
-                    return Final(ArrangementStatus.Found, stageA.Result, Array.Empty<string>(), used, false);
+                    return Final(ArrangementStatus.Found, stageA.Result, Array.Empty<string>(), used, false, Organize(grids, items));
                 }
             }
 
@@ -86,7 +93,7 @@ namespace SeamlessSwap.Core
             {
                 case SearchOutcome.Found:
                     bool moved = items.Any(i => i.Current.Side == ContainerSide.Incoming && !stageB.Result[i.Id].SameAs(i.Current));
-                    return Final(ArrangementStatus.Found, stageB.Result, Array.Empty<string>(), used, moved);
+                    return Final(ArrangementStatus.Found, stageB.Result, Array.Empty<string>(), used, moved, Organize(grids, items));
                 case SearchOutcome.NoSolution:
                     // Stage B covers everything stage A could do, so its proof stands even if A ran out.
                     return Final(ArrangementStatus.Impossible, null, Array.Empty<string>(), used, false);
@@ -95,9 +102,15 @@ namespace SeamlessSwap.Core
             }
         }
 
-        private static ArrangementResult Final(ArrangementStatus status, IReadOnlyDictionary<string, Placement> placements, IReadOnlyList<string> restricted, long nodes, bool rearranged)
+        private static ArrangementResult Final(ArrangementStatus status, IReadOnlyDictionary<string, Placement> placements, IReadOnlyList<string> restricted, long nodes, bool rearranged, IReadOnlyDictionary<string, Placement> organized = null)
         {
-            return new ArrangementResult(status, placements, restricted, nodes, rearranged);
+            return new ArrangementResult(status, placements, restricted, nodes, rearranged, organized);
+        }
+
+        private static IReadOnlyDictionary<string, Placement> Organize(IReadOnlyList<GridSnapshot> grids, ItemSnapshot[] items)
+        {
+            var search = new Search(grids, items, keepIncoming: false, OrganizeNodeBudget, tidy: true);
+            return search.Run() == SearchOutcome.Found ? search.Result : null;
         }
 
         private static bool FitsAnywhere(ItemSnapshot item, IReadOnlyList<GridSnapshot> grids)
@@ -143,14 +156,16 @@ namespace SeamlessSwap.Core
             private readonly bool _impossibleFromStart;
             private readonly bool[] _assigned;
             private readonly string[] _classKeys;
+            private readonly bool _tidy;
 
             public long Nodes { get; private set; }
             public Dictionary<string, Placement> Result => _placed;
 
-            public Search(IReadOnlyList<GridSnapshot> grids, IReadOnlyList<ItemSnapshot> items, bool keepIncoming, long budget)
+            public Search(IReadOnlyList<GridSnapshot> grids, IReadOnlyList<ItemSnapshot> items, bool keepIncoming, long budget, bool tidy = false)
             {
                 _grids = grids;
                 _budget = budget;
+                _tidy = tidy;
                 _rows = grids.Select(g => new ulong[g.Height]).ToArray();
                 _counts = new int[grids.Count];
 
@@ -271,8 +286,10 @@ namespace SeamlessSwap.Core
                         Remember(stateKey);
                         return SearchOutcome.NoSolution;
                     }
-                    if (count < bestCount ||
-                        (count == bestCount && item.Area > _free[bestIndex].Area))
+                    bool better = _tidy
+                        ? bestIndex < 0 || GoesFirst(item, _free[bestIndex])
+                        : count < bestCount || (count == bestCount && item.Area > _free[bestIndex].Area);
+                    if (better)
                     {
                         // _free is in ordinal id order, so an exact tie keeps the first id.
                         bestCount = count;
@@ -318,6 +335,16 @@ namespace SeamlessSwap.Core
 
                 Remember(stateKey);
                 return SearchOutcome.NoSolution;
+            }
+
+            // Largest first, and same shapes together. An exact tie keeps the first id, as above.
+            private static bool GoesFirst(ItemSnapshot item, ItemSnapshot best)
+            {
+                if (item.Area != best.Area)
+                {
+                    return item.Area > best.Area;
+                }
+                return item.Width != best.Width ? item.Width > best.Width : false;
             }
 
             private void Remember(string key)
@@ -417,7 +444,7 @@ namespace SeamlessSwap.Core
             {
                 var result = new List<Placement>();
                 var cur = item.Current;
-                if (cur.Grid >= 0 && cur.Grid < _grids.Count && Allowed(item, cur.Grid))
+                if (!_tidy && cur.Grid >= 0 && cur.Grid < _grids.Count && Allowed(item, cur.Grid))
                 {
                     int cw = cur.Rotated ? item.Height : item.Width;
                     int ch = cur.Rotated ? item.Width : item.Height;
@@ -435,6 +462,16 @@ namespace SeamlessSwap.Core
                 foreach (int g in order)
                 {
                     var grid = _grids[g];
+                    if (_tidy)
+                    {
+                        // Turned only when it won't go in this pocket any other way.
+                        AddAll(result, item, g, false);
+                        if (!item.Square)
+                        {
+                            AddAll(result, item, g, true);
+                        }
+                        continue;
+                    }
                     for (int y = 0; y < grid.Height; y++)
                     {
                         for (int x = 0; x < grid.Width; x++)
@@ -448,6 +485,17 @@ namespace SeamlessSwap.Core
                     }
                 }
                 return result;
+            }
+
+            private void AddAll(List<Placement> list, ItemSnapshot item, int g, bool rotated)
+            {
+                for (int y = 0; y < _grids[g].Height; y++)
+                {
+                    for (int x = 0; x < _grids[g].Width; x++)
+                    {
+                        AddIfFree(list, item, g, x, y, rotated);
+                    }
+                }
             }
 
             private void AddIfFree(List<Placement> list, ItemSnapshot item, int g, int x, int y, bool rotated)

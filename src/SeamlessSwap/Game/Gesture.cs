@@ -21,9 +21,14 @@ namespace SeamlessSwap.Game
             DisabledByFika,
         }
 
-        internal static Match Check(Slot target, Item dragged, ItemController controller, out SwapKind kind)
+        /// <param name="target">The slot under the drop, on either side.</param>
+        /// <param name="mySlot">The player's own slot, whichever side the drag started from.</param>
+        /// <param name="incoming">The body's container, whichever side the drag started from.</param>
+        internal static Match Check(Slot target, Item dragged, ItemController controller, out SwapKind kind, out Slot mySlot, out CompoundItem incoming)
         {
             kind = SwapKind.Backpack;
+            mySlot = null;
+            incoming = null;
 
             if (dragged == null || target == null)
             {
@@ -52,31 +57,13 @@ namespace SeamlessSwap.Game
                 return Match.None;
             }
 
-            // Target: the local player's own occupied equipment slot.
+            // Both sides of the loot screen hold the local player's controller (ItemsPanel.Show passes it
+            // to the body's ComplexStashPanel too), so this says who is dragging, not whose slot it is.
             if (!(controller is Player.PlayerInventoryController player) || player.Player == null || !player.Player.IsYourPlayer)
             {
                 return Match.None;
             }
-            if (target.ParentItem != player.Inventory.Equipment)
-            {
-                return Match.None;
-            }
-            if (!(target.ContainedItem is CompoundItem outgoing) || outgoing.Grids.Length == 0)
-            {
-                return Match.None;
-            }
-
-            // Source: the same slot on a corpse. A corpse always has a CorpseItemController (Corpse.Init),
-            // so a loot container, the ground or another live player can never match.
-            if (!(dragged.Parent is SlotItemAddress from) || from.Slot.ID != target.ID || !(from.Slot.ParentItem is InventoryEquipment))
-            {
-                return Match.None;
-            }
-            if (!(from.GetOwnerOrNull() is CorpseItemController))
-            {
-                return Match.None;
-            }
-            if (!(dragged is CompoundItem incoming) || incoming.Grids.Length == 0)
+            if (!Resolve(target, dragged, player.Inventory.Equipment, out mySlot, out incoming))
             {
                 return Match.None;
             }
@@ -94,6 +81,60 @@ namespace SeamlessSwap.Game
             }
 
             return SeamlessSwapPlugin.FikaInstalled ? Match.DisabledByFika : Match.Supported;
+        }
+
+        /// <summary>
+        /// Works out the two sides of a drag between the player's slot and the same slot on a body, in
+        /// either direction. The direction ends here: from this point on a swap is the same swap, so
+        /// everything downstream (order, hotkeys, messages) can't differ between the two.
+        /// A corpse always has a CorpseItemController (Corpse.Init), so a loot container, the ground or
+        /// another live player can never match.
+        /// </summary>
+        internal static bool Resolve(Slot target, Item dragged, InventoryEquipment mine, out Slot mySlot, out CompoundItem incoming)
+        {
+            mySlot = null;
+            incoming = null;
+
+            if (!(dragged.Parent is SlotItemAddress from) || from.Slot.ID != target.ID)
+            {
+                return false;
+            }
+
+            Slot own;
+            Slot theirs;
+            if (target.ParentItem == mine)
+            {
+                own = target;
+                theirs = from.Slot;
+            }
+            else if (from.Slot.ParentItem == mine)
+            {
+                own = from.Slot;
+                theirs = target;
+            }
+            else
+            {
+                return false;
+            }
+
+            if (!(theirs.ParentItem is InventoryEquipment body) || !(body.Owner is CorpseItemController))
+            {
+                return false;
+            }
+
+            // An empty slot on either side isn't a swap: dropping into one is the game's normal move.
+            if (!(own.ContainedItem is CompoundItem outgoing) || outgoing.Grids.Length == 0)
+            {
+                return false;
+            }
+            if (!(theirs.ContainedItem is CompoundItem bodyContainer) || bodyContainer.Grids.Length == 0)
+            {
+                return false;
+            }
+
+            mySlot = own;
+            incoming = bodyContainer;
+            return true;
         }
 
         private static bool IsBypassHeld()

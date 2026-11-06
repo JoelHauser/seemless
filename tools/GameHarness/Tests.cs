@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using EFT;
@@ -597,12 +598,8 @@ namespace SeamlessSwap.Harness
             Assert.Equal(before, gateway.Fingerprint(), "state after dry run");
             Assert.True(!scene.Controller.Search._temporaryKnownItems.Any(), "temporary known state must be released");
 
-            foreach (var step in steps)
-            {
-                Assert.True(gateway.IsStepValid(step), "step should be valid live: " + step);
-                var outcome = await gateway.ExecuteMoveAsync(step);
-                Assert.True(outcome.Succeeded, "live step refused: " + outcome.Error);
-            }
+            var outcome = await gateway.ExecuteMovesAsync(steps);
+            Assert.True(outcome.Succeeded, "live moves refused: " + outcome.Error);
             Assert.True(a.Parent.Container == theirs.Grids[1], "a landed in the wrong pocket");
             Assert.True(b.Parent.Container == theirs.Grids[0], "b landed in the wrong pocket");
         }
@@ -650,6 +647,403 @@ namespace SeamlessSwap.Harness
             Assert.Equal(ItemRotation.Vertical, ((GridItemAddress)rifle.Parent).LocationInGrid.r, "rotation");
         }
 
+        public static void Gesture_BothDirections_ResolveToTheSameSwap()
+        {
+            var scene = Packs(out var mine, out var theirs);
+            var mySlot = scene.MySlot(EquipmentSlot.Backpack);
+            var theirSlot = scene.TheirSlot(EquipmentSlot.Backpack);
+
+            Assert.True(Gesture.Resolve(mySlot, theirs, scene.Mine, out var slotA, out var incomingA), "body's onto mine");
+            Assert.True(Gesture.Resolve(theirSlot, mine, scene.Mine, out var slotB, out var incomingB), "mine onto body's");
+            Assert.Equal<Slot>(mySlot, slotA, "my slot, body's onto mine");
+            Assert.Equal<Slot>(mySlot, slotB, "my slot, mine onto body's");
+            Assert.Equal<Item>(theirs, incomingA, "incoming, body's onto mine");
+            Assert.Equal<Item>(theirs, incomingB, "incoming, mine onto body's");
+        }
+
+        public static async Task Drag_MineOntoBody_Backpack_PreservesEverything()
+        {
+            var scene = Packs(out var mine, out var theirs);
+            var ammo = Build.Thing(1, 1);
+            var existing = Build.Thing(3, 3);
+            ammo.SpawnedInSession = true;
+            Build.Put(mine, 0, ammo, 0, 0);
+            Build.Put(theirs, 0, existing, 0, 0);
+
+            await scene.Drop(scene.TheirSlot(EquipmentSlot.Backpack), mine, SwapKind.Backpack);
+
+            AssertSwapped(scene, EquipmentSlot.Backpack, mine, theirs);
+            Assert.ItemsExactlyOnce(mine, theirs, ammo, existing);
+            Assert.True(ammo.Parent.Container.ParentItem == theirs, "my item should end up in the equipped backpack");
+            Assert.True(ammo.SpawnedInSession, "found-in-raid was lost");
+            Assert.Equal(0, scene.Env.Notifications.Count, "success must be silent");
+            Assert.Equal("SwapResult", scene.Controller.OperationTypes[0], "first operation");
+        }
+
+        public static async Task Drag_MineOntoBody_Rig_HotkeySurvives()
+        {
+            var scene = Rigs(out var mine, out var theirs);
+            var med = Build.Bindable();
+            Build.Put(mine, 0, med, 0, 0);
+            var bound = scene.Controller.Inventory.FastAccess.BoundItems;
+            bound[EBoundItem.Item4] = med;
+
+            await scene.Drop(scene.TheirSlot(EquipmentSlot.TacticalVest), mine, SwapKind.Rig);
+
+            AssertSwapped(scene, EquipmentSlot.TacticalVest, mine, theirs);
+            Assert.Equal<Item>(med, bound[EBoundItem.Item4], "hotkey");
+        }
+
+        public static void Gesture_OtherDrags_AreLeftToTheGame()
+        {
+            var scene = Packs(out var mine, out var theirs);
+            var myBackpack = scene.MySlot(EquipmentSlot.Backpack);
+            var theirBackpack = scene.TheirSlot(EquipmentSlot.Backpack);
+
+            var rig = Build.Rig(false, (2, 2));
+            Build.Equip(scene.TheirSlot(EquipmentSlot.TacticalVest), rig);
+            Assert.True(!Gesture.Resolve(myBackpack, rig, scene.Mine, out _, out _), "body's rig onto my backpack slot");
+            Assert.True(!Gesture.Resolve(scene.TheirSlot(EquipmentSlot.TacticalVest), mine, scene.Mine, out _, out _), "my backpack onto body's rig slot");
+
+            var loose = Build.Pack((2, 2));
+            Build.Put(theirs, 0, loose, 0, 0);
+            Assert.True(!Gesture.Resolve(myBackpack, loose, scene.Mine, out _, out _), "a bag from a grid, not a slot");
+
+            Assert.True(!Gesture.Resolve(myBackpack, mine, scene.Mine, out _, out _), "my backpack onto its own slot");
+            Assert.True(!Gesture.Resolve(theirBackpack, theirs, scene.Mine, out _, out _), "body's backpack onto its own slot");
+
+            var noBodyBag = Build.NewScene();
+            var solo = Build.Pack((2, 2));
+            Build.Equip(noBodyBag.MySlot(EquipmentSlot.Backpack), solo);
+            Assert.True(!Gesture.Resolve(noBodyBag.TheirSlot(EquipmentSlot.Backpack), solo, noBodyBag.Mine, out _, out _), "mine onto a body's empty slot is a normal move");
+
+            var noBagOfMine = Build.NewScene();
+            var bodyBag = Build.Pack((2, 2));
+            Build.Equip(noBagOfMine.TheirSlot(EquipmentSlot.Backpack), bodyBag);
+            Assert.True(!Gesture.Resolve(noBagOfMine.MySlot(EquipmentSlot.Backpack), bodyBag, noBagOfMine.Mine, out _, out _), "body's onto my empty slot is a normal move");
+
+            // Neither slot is the player's: a drag between two bodies.
+            var otherBody = Build.NewScene();
+            var otherBag = Build.Pack((2, 2));
+            Build.Equip(otherBody.TheirSlot(EquipmentSlot.Backpack), otherBag);
+            Assert.True(!Gesture.Resolve(theirBackpack, otherBag, scene.Mine, out _, out _), "drag between two bodies");
+        }
+
+        public static void Gesture_BodyMustBeACorpse()
+        {
+            // The same layout as a body, but this equipment belongs to a plain controller, not a corpse.
+            var scene = Packs(out var mine, out var theirs);
+            var living = Build.NewScene();
+            var livingBag = Build.Pack((2, 2));
+            Build.Equip(living.MySlot(EquipmentSlot.Backpack), livingBag);
+
+            Assert.True(!Gesture.Resolve(scene.MySlot(EquipmentSlot.Backpack), livingBag, scene.Mine, out _, out _), "live player's bag onto mine");
+            Assert.True(!Gesture.Resolve(living.MySlot(EquipmentSlot.Backpack), mine, scene.Mine, out _, out _), "mine onto a live player's bag");
+        }
+
+        // Not a pass/fail test: prints where the time goes, on the game's real inventory classes. No UI
+        // runs here, so these are the mod's own costs, not the cost of redrawing the views.
+        public static async Task Perf_FullContainers()
+        {
+            for (int run = 1; run <= 3; run++)
+            {
+                var bag = Packs(out var mine, out var theirs, new[] { (8, 5) }, new[] { (6, 8), (2, 4), (2, 4) });
+                for (int i = 0; i < 40; i++)
+                {
+                    Build.Put(mine, 0, Build.Thing(1, 1), i % 8, i / 8);
+                }
+                await Measure(bag, EquipmentSlot.Backpack, SwapKind.Backpack, $"backpack, 40 items, run {run}");
+
+                var rig = Rigs(out var myRig, out var theirRig,
+                    myGrids: new[] { (2, 2), (2, 2), (2, 2), (2, 2) },
+                    theirGrids: new[] { (2, 2), (2, 2), (2, 2), (2, 2), (1, 2), (1, 2), (1, 2), (1, 2) });
+                for (int g = 0; g < 4; g++)
+                {
+                    for (int i = 0; i < 4; i++)
+                    {
+                        Build.Put(myRig, g, Build.Thing(1, 1), i % 2, i / 2);
+                    }
+                }
+                await Measure(rig, EquipmentSlot.TacticalVest, SwapKind.Rig, $"rig, 16 items, run {run}");
+
+                // The usual case: both bags hold scattered items, so tidying moves theirs too.
+                var mixed = Packs(out var myBag, out var theirBag, new[] { (6, 6) }, new[] { (6, 8) });
+                for (int i = 0; i < 12; i++)
+                {
+                    Build.Put(myBag, 0, Build.Thing(1 + i % 2, 1), i % 3 * 2, i / 3);
+                    Build.Put(theirBag, 0, Build.Thing(1 + i % 2, 1 + i % 3 / 2), i % 3 * 2, i / 3 * 2);
+                }
+                await Measure(mixed, EquipmentSlot.Backpack, SwapKind.Backpack, $"mixed bags, 24 items, run {run}", streaming: 16);
+            }
+        }
+
+        private static async Task Measure(Scene scene, EquipmentSlot slot, SwapKind kind, string name, int streaming = 8)
+        {
+            scene.SearchEverything();
+            var incoming = (CompoundItem)scene.TheirSlot(slot).ContainedItem;
+            var gateway = new GameGateway(scene.MySlot(slot), incoming, scene.Controller, kind, scene.Env);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            double Lap()
+            {
+                double ms = clock.Elapsed.TotalMilliseconds;
+                clock.Restart();
+                return ms;
+            }
+
+            gateway.ValidatePreconditions();
+            double validate = Lap();
+            var request = gateway.BuildRequest();
+            double build = Lap();
+            gateway.Fingerprint();
+            double print = Lap();
+            var arrangement = ArrangementSolver.Solve(request);
+            double solve = Lap();
+            var steps = MovePlanner.Plan(request, arrangement.Organized ?? arrangement.Placements);
+            double plan = Lap();
+            gateway.DryRun(steps);
+            double dry = Lap();
+
+            int frame = MainLoop.Frame;
+            await new SwapCoordinator(gateway, kind).RunAsync();
+            double whole = Lap();
+            int frames = MainLoop.Frame - frame;
+            int moves = steps.Count;
+            Assert.Equal(0, scene.Env.Notifications.Count, "benchmark swap should succeed");
+            Assert.True(frames <= streaming, $"{frames} frames for {moves} moves: the transfer should not stream");
+            Assert.Equal(1, scene.Controller.OperationFrames.Distinct().Count(), "frames the swap and its moves landed in: anything drawn between them is a flash");
+            System.Console.WriteLine($"        {name}: validate {validate:F1} build {build:F1} fingerprint {print:F1} solve {solve:F1} plan {plan:F1} dryrun {dry:F1} ms; whole swap {whole:F0} ms, {frames} frames for {moves} moves");
+        }
+
+        public static async Task Organize_PacksBothSets_KeepsFoundInRaid()
+        {
+            var scene = Packs(out var mine, out var theirs, new[] { (5, 7) }, new[] { (5, 7) });
+            var big = Build.Thing(2, 2);
+            var loot = Build.Thing(1, 1);
+            var small = Build.Thing(1, 1);
+            var lowDown = Build.Thing(2, 1);
+            loot.SpawnedInSession = true;
+            Build.Put(theirs, 0, big, 3, 5);
+            Build.Put(theirs, 0, lowDown, 0, 6);
+            Build.Put(mine, 0, loot, 4, 6);
+            Build.Put(mine, 0, small, 2, 3);
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            AssertSwapped(scene, EquipmentSlot.Backpack, mine, theirs);
+            Assert.ItemsExactlyOnce(mine, theirs, big, loot, small, lowDown);
+            Assert.Equal(0, scene.Env.Notifications.Count, "success must be silent");
+            var grid = theirs.Grids[0];
+            var bigAt = grid.GetItemLocation(big);
+            Assert.True(bigAt.x == 0 && bigAt.y == 0, $"largest item should lead, is at {bigAt.x},{bigAt.y}");
+            foreach (var item in grid.Items)
+            {
+                Assert.True(grid.GetItemLocation(item).y <= 1, "everything fits the top two rows, but one is at row " + grid.GetItemLocation(item).y);
+            }
+            Assert.True(loot.SpawnedInSession, "found-in-raid was lost");
+        }
+
+        public static async Task Organize_Rig_HotkeySurvivesTheRepack()
+        {
+            var scene = Rigs(out var mine, out var theirs);
+            var med = Build.Bindable();
+            var theirMag = Build.Thing(1, 2);
+            var theirBit = Build.Thing(1, 1);
+            Build.Put(mine, 0, med, 1, 1);
+            Build.Put(theirs, 0, theirMag, 1, 0);
+            Build.Put(theirs, 1, theirBit, 1, 1);
+            var hotkeys = scene.Controller.Inventory.FastAccess.BoundItems;
+            hotkeys[EBoundItem.Item4] = med;
+
+            await scene.Swap(EquipmentSlot.TacticalVest, SwapKind.Rig);
+
+            AssertSwapped(scene, EquipmentSlot.TacticalVest, mine, theirs);
+            Assert.ItemsExactlyOnce(mine, theirs, med, theirMag, theirBit);
+            Assert.True(theirMag.Parent.Container == theirs.Grids[2], "the mag should take the pocket shaped for it");
+            Assert.Equal<Item>(med, hotkeys[EBoundItem.Item4], "hotkey");
+            Assert.True(scene.Controller.IsAtBindablePlace(med), "binding is legal afterwards");
+        }
+
+        // BackpackGunSlot: a pack with a slot of its own, holding the player's gun.
+        private static Scene GunPacks(out Backpack mine, out Backpack theirs, out Item gun, ItemFilter[] theirFilters = null, (int, int)[] theirGrids = null)
+        {
+            var scene = Build.NewScene();
+            mine = Build.GunPack(null, (6, 6));
+            theirs = Build.GunPack(theirFilters, theirGrids ?? new[] { (6, 6) });
+            gun = Build.Gun();
+            Build.Equip(mine.Slots[0], gun);
+            Build.Equip(scene.MySlot(EquipmentSlot.Backpack), mine);
+            Build.Equip(scene.TheirSlot(EquipmentSlot.Backpack), theirs);
+            return scene;
+        }
+
+        private static ItemFilter[] Refusing(Item item)
+        {
+            return new[] { new ItemFilter { Filter = new MongoID[0], ExcludedFilter = new MongoID[] { item.TemplateId } } };
+        }
+
+        public static async Task Gun_FollowsToTheNewPacksSlot()
+        {
+            var scene = GunPacks(out var mine, out var theirs, out var gun);
+            var loot = Build.Thing(1, 1);
+            Build.Put(mine, 0, loot, 3, 3);
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            Assert.Equal<Item>(theirs, scene.MySlot(EquipmentSlot.Backpack).ContainedItem, "new pack equipped");
+            Assert.Equal<Item>(gun, theirs.Slots[0].ContainedItem, "gun on the new pack");
+            Assert.True(mine.Slots[0].ContainedItem == null, "gun left on the old pack");
+            Assert.True(loot.Parent.Container.ParentItem == theirs, "contents moved too");
+            Assert.Equal(scene.Controller.ID, gun.Owner.ID, "gun owner");
+            Assert.Equal(0, scene.Env.Notifications.Count, "success must be silent");
+        }
+
+        public static async Task Gun_NotAllowedOnTheNewPack_GoesInTheGrid()
+        {
+            var probe = Build.Gun();
+            var scene = GunPacks(out var mine, out var theirs, out var gun, Refusing(probe));
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            Assert.Equal<Item>(theirs, scene.MySlot(EquipmentSlot.Backpack).ContainedItem, "new pack equipped");
+            Assert.True(theirs.Slots[0].ContainedItem == null, "the slot refuses this gun");
+            Assert.True(gun.Parent.Container.ParentItem == theirs && gun.Parent is GridItemAddress, "gun should be in the grid");
+            Assert.True(mine.Slots[0].ContainedItem == null, "gun left on the old pack");
+            Assert.Equal(0, scene.Env.Notifications.Count, "success must be silent");
+        }
+
+        public static async Task Gun_NewSlotTaken_GoesInTheGrid_BodysGunStays()
+        {
+            var scene = GunPacks(out var mine, out var theirs, out var gun);
+            var bodysGun = Build.Gun();
+            Build.Equip(theirs.Slots[0], bodysGun);
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            Assert.Equal<Item>(bodysGun, theirs.Slots[0].ContainedItem, "the body's gun comes with its pack");
+            Assert.True(gun.Parent.Container.ParentItem == theirs && gun.Parent is GridItemAddress, "gun should be in the grid");
+            Assert.Equal(0, scene.Env.Notifications.Count, "success must be silent");
+        }
+
+        public static async Task Gun_NewPackHasNoSlot_GoesInTheGrid()
+        {
+            var scene = Build.NewScene();
+            var mine = Build.GunPack(null, (6, 6));
+            var theirs = Build.Pack((6, 6));
+            var gun = Build.Gun();
+            Build.Equip(mine.Slots[0], gun);
+            Build.Equip(scene.MySlot(EquipmentSlot.Backpack), mine);
+            Build.Equip(scene.TheirSlot(EquipmentSlot.Backpack), theirs);
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            Assert.True(gun.Parent.Container.ParentItem == theirs, "gun should be in the grid");
+            Assert.True(mine.Slots[0].ContainedItem == null, "gun left on the old pack");
+        }
+
+        public static async Task Gun_NoRoomAnywhere_RefusedAndNothingMoves()
+        {
+            var probe = Build.Gun();
+            var scene = GunPacks(out var mine, out var theirs, out var gun, Refusing(probe), new[] { (2, 2) });
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            AssertNothingChanged(scene, EquipmentSlot.Backpack, mine, theirs, Messages.BackpackNoSpace);
+            Assert.Equal<Item>(gun, mine.Slots[0].ContainedItem, "gun stays with you");
+        }
+
+        public static async Task Gun_ReversedDrag_FollowsToo()
+        {
+            var scene = GunPacks(out var mine, out var theirs, out var gun);
+
+            await scene.Drop(scene.TheirSlot(EquipmentSlot.Backpack), mine, SwapKind.Backpack);
+
+            Assert.Equal<Item>(gun, theirs.Slots[0].ContainedItem, "gun on the new pack");
+            Assert.Equal<Item>(theirs, scene.MySlot(EquipmentSlot.Backpack).ContainedItem, "new pack equipped");
+        }
+
+        public static async Task Gun_RefusedMidway_IsReportedAsLeftBehind()
+        {
+            var scene = GunPacks(out var mine, out var theirs, out var gun);
+            scene.Controller.RefuseFromOperation = 1;
+            scene.Controller.RefuseCount = 99;
+
+            await scene.Swap(EquipmentSlot.Backpack, SwapKind.Backpack);
+
+            Assert.Equal<Item>(gun, mine.Slots[0].ContainedItem, "gun still on the old pack");
+            Assert.Equal(1, scene.Env.Notifications.Count, "notifications");
+            Assert.Equal(Messages.Interrupted(SwapKind.Backpack, 1), scene.Env.Notifications[0], "the player must hear about the gun");
+        }
+
+        // Cell by cell, from each item's own location and size: nothing here trusts the grid's own report.
+        private static void AssertNoSharedCells(CompoundItem container, string when)
+        {
+            foreach (var grid in container.Grids)
+            {
+                var cells = new Item[grid.GridWidth, grid.GridHeight];
+                foreach (var item in grid.Items)
+                {
+                    var at = grid.GetItemLocation(item);
+                    var size = item.CalculateCellSize();
+                    int w = at.r == ItemRotation.Vertical ? size.Y : size.X;
+                    int h = at.r == ItemRotation.Vertical ? size.X : size.Y;
+                    for (int y = at.y; y < at.y + h; y++)
+                    {
+                        for (int x = at.x; x < at.x + w; x++)
+                        {
+                            Assert.True(x < grid.GridWidth && y < grid.GridHeight, $"{when}: item out of its grid");
+                            Assert.True(cells[x, y] == null, $"{when}: two items in cell {x},{y} of {grid.GridWidth}x{grid.GridHeight}");
+                            cells[x, y] = item;
+                        }
+                    }
+                }
+            }
+        }
+
+        // What Joel was doing when two items shared a cell: flipping rigs back and forth on one body.
+        public static async Task Stress_FlippingRandomRigs_NeverSharesACell()
+        {
+            var random = new System.Random(20261105);
+            var pockets = new[] { (1, 1), (1, 2), (2, 1), (2, 2), (1, 3), (3, 2), (2, 3), (4, 2) };
+            var shapes = new[] { (1, 1), (1, 1), (1, 2), (2, 1), (2, 2), (1, 3), (3, 1) };
+            int swaps = 0, refused = 0, failedOps = 0, parked = 0;
+
+            for (int run = 0; run < 400; run++)
+            {
+                var myGrids = Enumerable.Range(0, random.Next(2, 9)).Select(_ => pockets[random.Next(pockets.Length)]).ToArray();
+                var theirGrids = Enumerable.Range(0, random.Next(2, 9)).Select(_ => pockets[random.Next(pockets.Length)]).ToArray();
+                var scene = Rigs(out var mine, out var theirs, myGrids: myGrids, theirGrids: theirGrids);
+                foreach (var rig in new[] { mine, theirs })
+                {
+                    foreach (var grid in rig.Grids)
+                    {
+                        for (int tries = random.Next(0, 5); tries > 0; tries--)
+                        {
+                            var shape = shapes[random.Next(shapes.Length)];
+                            var thing = Build.Thing(shape.Item1, shape.Item2);
+                            var spot = grid.FindFreeSpace(thing);
+                            if (spot != null)
+                            {
+                                Build.Put(rig, System.Array.IndexOf(rig.Grids, grid), thing, spot.x, spot.y, spot.r == ItemRotation.Vertical);
+                            }
+                        }
+                    }
+                }
+
+                for (int flip = 0; flip < 4; flip++)
+                {
+                    int before = scene.Env.Notifications.Count;
+                    await scene.Swap(EquipmentSlot.TacticalVest, SwapKind.Rig);
+                    swaps++;
+                    refused += scene.Env.Notifications.Count - before;
+                    AssertNoSharedCells(mine, $"run {run} flip {flip}");
+                    AssertNoSharedCells(theirs, $"run {run} flip {flip}");
+                }
+                failedOps += scene.Controller.FailedOperations.Count;
+            }
+            System.Console.WriteLine($"        {swaps} swaps, {refused} refused, {failedOps} failed operations");
+            Assert.Equal(0, failedOps, "operations the game failed");
+        }
+
         public static async Task RepeatedSwaps_RoundTrip()
         {
             var scene = Packs(out var mine, out var theirs);
@@ -690,8 +1084,7 @@ namespace SeamlessSwap.Harness
         }
 
         public bool IsSwapApplied() => _inner.IsSwapApplied();
-        public bool IsStepValid(in MoveStep step) => _inner.IsStepValid(step);
-        public Task<OperationOutcome> ExecuteMoveAsync(MoveStep step) => _inner.ExecuteMoveAsync(step);
+        public Task<OperationOutcome> ExecuteMovesAsync(IReadOnlyList<MoveStep> steps) => _inner.ExecuteMovesAsync(steps);
         public int CountOutgoingContents() => _inner.CountOutgoingContents();
         public bool CanContinue() => _inner.CanContinue();
         public Task NextFrame() => _inner.NextFrame();

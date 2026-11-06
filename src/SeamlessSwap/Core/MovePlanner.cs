@@ -26,8 +26,9 @@ namespace SeamlessSwap.Core
 
             // Items already where they belong need no step.
             var pending = items.Where(i => !current[i.Id].SameAs(targets[i.Id])).ToList();
-            // Incoming items first: rearranging is what makes room for the outgoing ones.
-            pending = pending.OrderBy(i => i.Current.Side == ContainerSide.Incoming ? 0 : 1)
+            // The player's own items first wherever their target is free, so that an interruption leaves
+            // as few as possible in the bag on the body. Incoming items move as they come free to.
+            pending = pending.OrderBy(i => i.Current.Side == ContainerSide.Outgoing ? 0 : 1)
                 .ThenBy(i => i.Id, StringComparer.Ordinal)
                 .ToList();
 

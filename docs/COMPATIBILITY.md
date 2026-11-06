@@ -9,6 +9,8 @@ Patch owners and priorities below were read from Harmony at run time with the re
 |---|---|---|---|
 | `SlotView.CanAccept` | postfix | `com.joelhauser.seamlessswap` | Says yes to the gesture only. Reference checks; no mutation, no notification. |
 | `SlotView.AcceptItem` | prefix | `com.joelhauser.seamlessswap` | Runs the swap and skips the original, for the gesture only. |
+| `Player.SinglePlayerInventoryController.Execute` | prefix | `com.joelhauser.seamlessswap` | For this mod's own operations only (one flag, consumed by the first call): runs them without the controller's one-frame wait, via the same base call, so a swap lands in one frame. Every other operation passes through. |
+| `SearchableItemView.Show` | postfix | `com.joelhauser.seamlessswap` | During a swap only: hides the old container's contents on the body until they've moved. Changes nothing else. |
 
 No priorities, no `before`/`after`: nothing in the overlap depends on order (below). Soft
 dependencies on `com.tyfon.uifixes`, `com.wtt.packnstrap` and `com.fika.core` only order loading.
@@ -46,6 +48,30 @@ any multi-selection, the mod's patches return immediately.
 
 A custom item with grids isn't eligible just for having grids: only what sits in the `Backpack` or
 `TacticalVest` slot is.
+
+## BackpackGunSlot 1.1.1 (`com.20fpsguy.backpackgunslot`)
+
+Its server half adds a slot (default `mod_backpack_weapon`) to each backpack template, and which guns a
+pack accepts depends on the pack's size. Its client half only draws that slot: its patches
+(`SlotView.SetupItemView`, `SlotView.ScaleItem`, `SearchableSlotView.CreateSlots`, `ContainersPanel`,
+`GridWindow`, `ContainedGridsView`, `EquipItemWindow`, `ItemSpecificationPanel`, `ObjectsFactory`) are read,
+and none overlaps Seamless Swap's two.
+
+| Situation | Result |
+|---|---|
+| New pack's slot is free and accepts the gun | The gun moves to it |
+| Slot taken, refuses the gun, or the new pack has no slot | The gun is packed into the new pack's grid with everything else |
+| No room in the grid either | "Not enough space…", nothing moves |
+| The body's pack has a gun on it | It comes with that pack |
+
+**Their bug, guarded:** when the backpack changes, BackpackSlotBinding caches its row's layout elements while its
+old `LayoutElement` is still pending destruction, then reads `.enabled` on it next frame (IL 0x3b2 in `PlaceSlot`),
+throws, and shuts its ON PACK slot off until the inventory is reopened. Seamless Swap prefixes `PlaceSlot`, found
+by name, and drops that cache only when it holds a destroyed object, so the mod rebuilds it as it already does.
+Worth reporting upstream.
+
+The gun is found by type (an `IWeapon` in a slot of the bag), not by slot name, which is a setting. It is
+counted in what was left behind, so an interrupted swap reports it. No type from the mod is referenced.
 
 ## Fika 2.4.6 (`com.fika.core`)
 

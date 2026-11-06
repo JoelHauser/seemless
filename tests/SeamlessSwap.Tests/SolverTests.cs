@@ -130,6 +130,128 @@ namespace SeamlessSwap.Tests
             Check.True(res.Placements["old"].SameAs(new Placement(ContainerSide.Incoming, 0, 1, 1, false)), "old moved");
         }
 
+        // Every occupied cell, by grid, for looking at a layout's shape.
+        private static bool[,] Occupied(GridSnapshot grid, int index, ArrangementRequest request, IReadOnlyDictionary<string, Placement> placements)
+        {
+            var cells = new bool[grid.Width, grid.Height];
+            foreach (var item in request.Items)
+            {
+                var p = placements[item.Id];
+                if (p.Grid != index)
+                {
+                    continue;
+                }
+                int w = p.Rotated ? item.Height : item.Width;
+                int h = p.Rotated ? item.Width : item.Height;
+                for (int y = p.Y; y < p.Y + h; y++)
+                {
+                    for (int x = p.X; x < p.X + w; x++)
+                    {
+                        Check.True(!cells[x, y], "organized layout overlaps at " + x + "," + y);
+                        cells[x, y] = true;
+                    }
+                }
+            }
+            return cells;
+        }
+
+        // The layout from Joel's screenshot of a Pilgrim, 5 wide and 7 tall: holes and a near-empty row.
+        private static ArrangementRequest ScatteredPilgrim()
+        {
+            return Request(Grids((5, 7)),
+                Inc("orion", 2, 2, 0, 2, 0, 1),
+                Inc("rs1", 1, 1, 0, 4, 0, 1), Inc("rs2", 1, 1, 0, 4, 1, 1),
+                Inc("mb", 1, 1, 0, 0, 2, 1), Inc("ak103", 1, 1, 0, 1, 2, 1), Inc("ak74", 1, 1, 0, 2, 2, 1),
+                Inc("korund", 1, 1, 0, 3, 2, 1), Inc("hg", 1, 1, 0, 4, 2, 1),
+                Inc("krechet", 1, 1, 0, 0, 3, 1), Inc("qmk", 2, 1, 0, 1, 3, 1), Inc("fal", 2, 1, 0, 3, 3, 1),
+                Inc("grip", 1, 1, 0, 0, 4, 1),
+                Out("f2000", 2, 1, 0, 0, 0, 1), Out("falbel", 2, 1, 0, 2, 0, 1));
+        }
+
+        [Test]
+        private static void Organized_ClosesTheHoles()
+        {
+            var req = ScatteredPilgrim();
+            var res = ArrangementSolver.Solve(req);
+            AssertValid(req, res);
+            Check.True(res.Organized != null, "no tidy layout");
+            var cells = Occupied(req.IncomingGrids[0], 0, req, res.Organized);
+            // 21 cells of items in rows of 5 fill five rows: anything lower is a hole somewhere above it.
+            for (int y = 5; y < 7; y++)
+            {
+                for (int x = 0; x < 5; x++)
+                {
+                    Check.True(!cells[x, y], $"item left low in the bag at {x},{y}");
+                }
+            }
+            for (int y = 1; y < 7; y++)
+            {
+                for (int x = 0; x < 5; x++)
+                {
+                    Check.True(!cells[x, y] || cells[x, y - 1], $"gap above an item at {x},{y}");
+                }
+            }
+            Check.True(res.Organized["orion"].X == 0 && res.Organized["orion"].Y == 0, "largest item should lead");
+            Check.True(req.Items.All(i => !res.Organized[i.Id].Rotated), "nothing here needs turning");
+            Check.True(MovePlanner.Plan(req, res.Organized) != null, "tidy layout should be reachable");
+        }
+
+        [Test]
+        private static void Organized_SmallPocketsFillBeforeTheMainCompartment()
+        {
+            var req = Request(Grids((5, 5), (1, 2)), Out("a", 2, 2, 0, 0, 0, 2), Out("mag", 1, 2, 0, 2, 0, 2));
+            var res = ArrangementSolver.Solve(req);
+            AssertValid(req, res);
+            Check.Equal(1, res.Organized["mag"].Grid, "mag's pocket");
+            Check.Equal(0, res.Organized["a"].Grid, "main compartment");
+        }
+
+        [Test]
+        private static void Organized_FixedItemsStay()
+        {
+            var req = Request(Grids((4, 4)), Inc("pin", 1, 1, 0, 2, 2, 1, isFixed: true), Out("a", 1, 1, 0, 0, 0, 1));
+            var res = ArrangementSolver.Solve(req);
+            Check.True(res.Organized["pin"].SameAs(req.Items.First(i => i.Id == "pin").Current), "fixed item moved");
+        }
+
+        [Test]
+        private static void Organized_RespectsFiltersAndItemLimits()
+        {
+            var limited = new[] { new GridSnapshot(3, 3, 1), new GridSnapshot(3, 3) };
+            var req = Request(limited, Out("a", 1, 1, 0, 0, 0, 2), Out("b", 1, 1, 0, 1, 0, 2), Out("c", 1, 1, 0, 2, 0, 2, allow: new[] { 1 }));
+            var res = ArrangementSolver.Solve(req);
+            Check.Equal(1, res.Organized.Values.Count(p => p.Grid == 0), "grid item limit");
+            Check.Equal(1, res.Organized["c"].Grid, "filter");
+        }
+
+        [Test]
+        private static void Organized_NeverChangesWhetherASwapIsPossible()
+        {
+            var random = new Random(4242);
+            for (int run = 0; run < 300; run++)
+            {
+                int w = random.Next(2, 7);
+                int h = random.Next(2, 7);
+                var items = new List<ItemSnapshot>();
+                for (int i = 0; i < random.Next(1, 14); i++)
+                {
+                    items.Add(Out("o" + i, random.Next(1, 3), random.Next(1, 3), 0, i % 9, i / 9, 1));
+                }
+                var req = Request(Grids((w, h)), items.ToArray());
+                var res = ArrangementSolver.Solve(req);
+                if (res.Status != ArrangementStatus.Found)
+                {
+                    Check.True(res.Organized == null, "a tidy layout with no plain one");
+                    continue;
+                }
+                AssertValid(req, res);
+                if (res.Organized != null)
+                {
+                    AssertValid(req, new ArrangementResult(ArrangementStatus.Found, res.Organized, Array.Empty<string>(), 0, false));
+                }
+            }
+        }
+
         [Test]
         private static void SameLayout_KeepsOriginalPositions()
         {

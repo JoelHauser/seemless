@@ -71,9 +71,11 @@ namespace SeamlessSwap.Core
         Task<OperationOutcome> ExecuteSwapAsync();
         bool IsSwapApplied();
 
-        /// <summary>True while the item is where the step expects and the destination is free.</summary>
-        bool IsStepValid(in MoveStep step);
-        Task<OperationOutcome> ExecuteMoveAsync(MoveStep step);
+        /// <summary>
+        /// Runs the steps in order, as few frames as the game allows, so the player sees one change and
+        /// not a stream of items. Stops at the first failure; whatever already ran stays done.
+        /// </summary>
+        Task<OperationOutcome> ExecuteMovesAsync(IReadOnlyList<MoveStep> steps);
 
         /// <summary>Items the player owned or looted that are still in the outgoing container.</summary>
         int CountOutgoingContents();
@@ -81,7 +83,7 @@ namespace SeamlessSwap.Core
         /// <summary>False once the player is dead, or the raid or game world is gone.</summary>
         bool CanContinue();
 
-        /// <summary>Lets one frame pass. Inventory operations run at most one per frame.</summary>
+        /// <summary>Lets one frame pass.</summary>
         Task NextFrame();
 
         /// <summary>Completes after the time limit for a single acknowledgment.</summary>
@@ -202,12 +204,20 @@ namespace SeamlessSwap.Core
                 return;
             }
 
-            error = _gateway.DryRun(steps);
-            if (error != null)
+            var organized = PlanOrganized(request, arrangement);
+            if (organized != null)
             {
-                _gateway.Log("Dry run refused the plan: " + error);
-                _gateway.Notify(error);
-                return;
+                steps = organized;
+            }
+            else
+            {
+                error = _gateway.DryRun(steps);
+                if (error != null)
+                {
+                    _gateway.Log("Dry run refused the plan: " + error);
+                    _gateway.Notify(error);
+                    return;
+                }
             }
 
             Task<OperationOutcome> swapTask = _gateway.ExecuteSwapAsync();
@@ -234,8 +244,34 @@ namespace SeamlessSwap.Core
                 return;
             }
 
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             await Transfer(steps);
+            _gateway.Log($"Transfer: {steps.Count} moves in {clock.ElapsedMilliseconds} ms.");
             Finish();
+        }
+
+        // The tidy layout, when it can be reached and the game accepts every step of it. Null means use
+        // the plain one: tidiness must never be the reason a swap is refused.
+        private List<MoveStep> PlanOrganized(ArrangementRequest request, ArrangementResult arrangement)
+        {
+            if (arrangement.Organized == null)
+            {
+                _gateway.Log("No tidy layout found; items keep the plain arrangement.");
+                return null;
+            }
+            var steps = MovePlanner.Plan(request, arrangement.Organized);
+            if (steps == null)
+            {
+                _gateway.Log("The tidy layout can't be reached step by step; items keep the plain arrangement.");
+                return null;
+            }
+            string error = _gateway.DryRun(steps);
+            if (error != null)
+            {
+                _gateway.Log("Dry run refused the tidy layout: " + error);
+                return null;
+            }
+            return steps;
         }
 
         private string MessageFor(ArrangementResult arrangement)
@@ -293,6 +329,12 @@ namespace SeamlessSwap.Core
                     _gateway.Log("Re-plan found no move order.");
                     return;
                 }
+                var organized = PlanOrganized(request, arrangement);
+                if (organized != null)
+                {
+                    steps = organized;
+                    continue;
+                }
                 string error = _gateway.DryRun(steps);
                 if (error != null)
                 {
@@ -304,31 +346,30 @@ namespace SeamlessSwap.Core
 
         private async Task<bool> RunSteps(IReadOnlyList<MoveStep> steps)
         {
-            foreach (var step in steps)
+            // No frame passes between the swap and the moves: a frame drawn here would show the swap
+            // half done. The gateway waits a frame itself after any operation that finished late.
+            if (!_gateway.CanContinue())
             {
-                // Operations are spaced one per frame; UI Fixes documents bugs from running several in one.
-                await _gateway.NextFrame();
-                if (!_gateway.CanContinue())
-                {
-                    return false;
-                }
-                if (!_gateway.IsStepValid(step))
-                {
-                    _gateway.Log("Stale step: " + step);
-                    return false;
-                }
-                var outcome = await WithTimeout(_gateway.ExecuteMoveAsync(step));
-                if (!outcome.Succeeded)
-                {
-                    _gateway.Log($"Move refused: {step} - {outcome.Error}");
-                    return false;
-                }
+                return false;
+            }
+
+            var outcome = await WithTimeout(_gateway.ExecuteMovesAsync(steps));
+            if (!outcome.Succeeded)
+            {
+                _gateway.Log("Moves stopped: " + outcome.Error);
+                return false;
             }
             return true;
         }
 
         private async Task<OperationOutcome> WithTimeout(Task<OperationOutcome> operation)
         {
+            // The usual case for a move. Starting a timer per item would only make garbage.
+            if (operation.IsCompleted)
+            {
+                return await operation;
+            }
+
             var finished = await Task.WhenAny(operation, _gateway.AckTimeout());
             if (finished == operation)
             {

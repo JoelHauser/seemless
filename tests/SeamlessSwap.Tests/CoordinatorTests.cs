@@ -27,6 +27,8 @@ namespace SeamlessSwap.Tests
         public readonly List<string> Calls = new List<string>();
         public string PreconditionError;
         public string DryRunError;
+        /// <summary>Refuses this many dry runs, then accepts: the first is the tidy layout's.</summary>
+        public int DryRunRefusals;
         public string SwapError;
         public int RefuseMoveNumber = -1;
         public int RefuseMoveCount = 1;
@@ -90,6 +92,11 @@ namespace SeamlessSwap.Tests
         {
             Calls.Add("dryrun");
             if (ThrowInDryRun) throw new InvalidOperationException("boom");
+            if (DryRunRefusals > 0)
+            {
+                DryRunRefusals--;
+                return "refused by test";
+            }
             return DryRunError;
         }
 
@@ -148,6 +155,27 @@ namespace SeamlessSwap.Tests
             Check.True(FreeFor(thing, step.To), "executed a move onto an occupied location: " + step);
             thing.At = step.To;
             return Task.FromResult(OperationOutcome.Success);
+        }
+
+        public async Task<OperationOutcome> ExecuteMovesAsync(IReadOnlyList<MoveStep> steps)
+        {
+            foreach (var step in steps)
+            {
+                if (!CanContinue())
+                {
+                    return OperationOutcome.Failure("cannot continue");
+                }
+                if (!IsStepValid(step))
+                {
+                    return OperationOutcome.Failure("stale step: " + step);
+                }
+                var outcome = await ExecuteMoveAsync(step);
+                if (!outcome.Succeeded)
+                {
+                    return outcome;
+                }
+            }
+            return OperationOutcome.Success;
         }
 
         public int CountOutgoingContents() => Things.Count(t => t.At.Side == ContainerSide.Outgoing);
@@ -283,6 +311,26 @@ namespace SeamlessSwap.Tests
             string before = inv.Fingerprint();
             await Run(inv);
             AssertUnchangedAfterRejection(inv, before, Messages.Restricted);
+        }
+
+        [Test]
+        private static async Task TidyLayoutRefused_SwapStillHappens()
+        {
+            var inv = new FakeInventory
+            {
+                IncomingGrids = new[] { new GridSnapshot(4, 4) },
+                OutgoingGrids = new[] { new GridSnapshot(4, 4) },
+                DryRunRefusals = 1,
+            };
+            inv.AddOut("a", 1, 1, 0, 3, 3);
+            inv.AddIn("b", 2, 2, 0, 2, 2);
+
+            await Run(inv);
+
+            Check.True(inv.Swapped, "a refused tidy layout must not stop the swap");
+            Check.Equal(0, inv.Notifications.Count, "notifications");
+            Check.Equal(0, inv.CountOutgoingContents(), "items left behind");
+            Check.True(inv.Things.First(t => t.Id == "b").At.SameAs(new Placement(ContainerSide.Incoming, 0, 2, 2, false)), "the plain layout leaves b where it was");
         }
 
         [Test]

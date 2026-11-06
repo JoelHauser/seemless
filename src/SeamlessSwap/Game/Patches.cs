@@ -29,7 +29,7 @@ namespace SeamlessSwap.Game
             {
                 return;
             }
-            if (Gesture.Check(__instance.Slot, itemContext.Item, ___ItemController, out _) == Gesture.Match.Supported)
+            if (Gesture.Check(__instance.Slot, itemContext.Item, ___ItemController, out _, out _, out _) == Gesture.Match.Supported)
             {
                 // Clears any error the original produced, so no tooltip claims the drop will fail.
                 operation = default;
@@ -55,12 +55,16 @@ namespace SeamlessSwap.Game
                 return true;
             }
 
-            switch (Gesture.Check(__instance.Slot, itemContext.Item, ___ItemController, out SwapKind kind))
+            switch (Gesture.Check(__instance.Slot, itemContext.Item, ___ItemController, out SwapKind kind, out Slot mySlot, out CompoundItem incoming))
             {
                 case Gesture.Match.Supported:
                     // The original calls this before anything else; the drag view depends on it.
                     itemContext.DragCancelled();
-                    __result = SwapRunner.Start(__instance, __instance.Slot, itemContext.Item, (Player.PlayerInventoryController)___ItemController, kind);
+                    if (SeamlessSwapPlugin.DiagnosticLogging.Value)
+                    {
+                        SeamlessSwapPlugin.Log.LogInfo(__instance.Slot == mySlot ? "Drop: the body's container onto yours." : "Drop: your container onto the body's.");
+                    }
+                    __result = SwapRunner.Start(__instance, mySlot, incoming, (Player.PlayerInventoryController)___ItemController, kind);
                     return false;
 
                 case Gesture.Match.DisabledByFika:

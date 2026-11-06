@@ -79,12 +79,15 @@ namespace SeamlessSwap.Harness
     /// Stands in for Unity's synchronization context: one thread runs everything, and anything posted
     /// (an await continuation, Task.Yield) runs on a later pass of the loop, the way Unity runs posted
     /// work once per frame. Without it, continuations land on pool threads and race the game's own
-    /// async operation pipeline, which can never happen in the game.
+    /// async operation pipeline, which can never happen in the game. A pass drains only what was queued
+    /// when it began, so Frame counts what Unity's would.
     /// </summary>
     internal sealed class MainLoop : System.Threading.SynchronizationContext
     {
         private readonly System.Collections.Concurrent.BlockingCollection<KeyValuePair<System.Threading.SendOrPostCallback, object>> _queue =
             new System.Collections.Concurrent.BlockingCollection<KeyValuePair<System.Threading.SendOrPostCallback, object>>();
+
+        public static int Frame;
 
         public override void Post(System.Threading.SendOrPostCallback d, object state)
         {
@@ -111,7 +114,13 @@ namespace SeamlessSwap.Harness
                 {
                     if (loop._queue.TryTake(out var work, 100))
                     {
+                        int rest = loop._queue.Count;
                         work.Key(work.Value);
+                        for (int i = 0; i < rest && loop._queue.TryTake(out work); i++)
+                        {
+                            work.Key(work.Value);
+                        }
+                        Frame++;
                     }
                     if (DateTime.UtcNow > deadline)
                     {
@@ -174,6 +183,54 @@ namespace SeamlessSwap.Harness
         }
 
         public override ISearchController SearchController => Search;
+
+        public readonly List<string> FailedOperations = new List<string>();
+
+        /// <summary>The frame each operation really ran in.</summary>
+        public readonly List<int> OperationFrames = new List<int>();
+
+        // SinglePlayerInventoryController.ExecuteAsync: what a raid's local player does before every operation.
+        // Immediate.ExecutePatch does the same to the game's controller.
+        public override void Execute(EFT.InventoryLogic.Operations.AbstractOperation operation, Callback callback)
+        {
+            if (Immediate.Next)
+            {
+                Immediate.Next = false;
+                RunNow(operation, callback);
+                return;
+            }
+            ExecuteAfterYield(operation, callback);
+        }
+
+        private async void ExecuteAfterYield(EFT.InventoryLogic.Operations.AbstractOperation operation, Callback callback)
+        {
+            await Task.Yield();
+            RunNow(operation, callback);
+        }
+
+        private void RunNow(EFT.InventoryLogic.Operations.AbstractOperation operation, Callback callback)
+        {
+            OperationFrames.Add(MainLoop.Frame);
+
+            // ItemController.Execute, minus its failure log: that reads Time.frameCount, a Unity call this
+            // process doesn't have, which would hide the operation's real error.
+            if (!CanExecute(operation))
+            {
+                operation.Dispose();
+                callback?.Fail("Can't execute " + operation, 1);
+                return;
+            }
+            operation.Execute(result =>
+            {
+                if (!result.Succeed)
+                {
+                    FailedOperations.Add(operation + ": " + result.Error);
+                    if (TestEnvironment.Verbose) Console.WriteLine("    operation failed: " + operation + ": " + result.Error);
+                }
+                callback?.Invoke(result);
+            });
+        }
+
         public override Item ItemInHands => Hands;
 
         public override Task<IResult> TryRunNetworkTransaction(OperationResult operationResult, Callback callback = null)
@@ -194,6 +251,8 @@ namespace SeamlessSwap.Harness
         public readonly List<string> Notifications = new List<string>();
         public bool ScreenOpen { get; set; } = true;
         public bool PlayerCanAct { get; set; } = true;
+        public void BeforeSwap(CompoundItem incoming, CompoundItem outgoing, IEnumerable<Item> extras) { }
+        public void Settled(CompoundItem first, CompoundItem second) { }
         public void Notify(string message) => Notifications.Add(message);
         public static bool Verbose = System.Environment.GetEnvironmentVariable("HARNESS_VERBOSE") == "1";
         public void Log(string message)
@@ -236,6 +295,38 @@ namespace SeamlessSwap.Harness
             var gateway = new GameGateway(MySlot(slot), incoming, Controller, kind, Env);
             return new SwapCoordinator(gateway, kind).RunAsync();
         }
+
+        /// <summary>A real drop: the gesture decides the sides, then the swap runs from what it decided.</summary>
+        public Task Drop(Slot target, Item dragged, SwapKind kind)
+        {
+            SearchEverything();
+            Assert.True(Gesture.Resolve(target, dragged, Mine, out var mySlot, out var incoming), "the drop should be the gesture");
+            var gateway = new GameGateway(mySlot, incoming, Controller, kind, Env);
+            return new SwapCoordinator(gateway, kind).RunAsync();
+        }
+    }
+
+    /// <summary>
+    /// The game's Weapon constructor crashes this process, so guns are this: a real item that says it's a
+    /// weapon the only way the mod asks. Everything else about it is ordinary item behavior.
+    /// </summary>
+    internal sealed class StandInGun : CompoundItem, IWeapon
+    {
+        public StandInGun(string id, CompoundItemTemplate template) : base(id, template)
+        {
+        }
+
+        float IWeapon.TotalWeight => 0;
+        float IWeapon.RecoilForceBack => 0;
+        float IWeapon.RecoilBase => 0;
+        float IWeapon.SpeedFactor => 0;
+        bool IWeapon.IsUnderbarrelWeapon => false;
+        float IWeapon.RecoilDelta => 0;
+        Weapon.MalfunctionState IWeapon.MalfState => null;
+        Item IWeapon.Item => this;
+        WeaponTemplate IWeapon.WeaponTemplate => null;
+        Slot[] IWeapon.Chambers => new Slot[0];
+        int IWeapon.GetCurrentMagazineCount() => 0;
     }
 
     internal static class Build
@@ -283,6 +374,21 @@ namespace SeamlessSwap.Harness
         public static Backpack Pack(params (int w, int h)[] grids)
         {
             return new Backpack(Id(), new BackpackTemplate { CanPutIntoDuringTheRaid = true, StackObjectsCount = 1, StackMaxSize = 1, Width = 5, Height = 5, Grids = Grids(grids) });
+        }
+
+        // A pack as BackpackGunSlot's server half leaves it: its template gains one weapon slot.
+        public static Backpack GunPack(ItemFilter[] filters, params (int w, int h)[] grids)
+        {
+            return new Backpack(Id(), new BackpackTemplate
+            {
+                CanPutIntoDuringTheRaid = true, StackObjectsCount = 1, StackMaxSize = 1, Width = 5, Height = 5, Grids = Grids(grids),
+                Slots = new[] { new Slot("mod_backpack_weapon", filters ?? new ItemFilter[0], false, EParentMergeType.InheritFromItem) },
+            });
+        }
+
+        public static Item Gun(int w = 4, int h = 2)
+        {
+            return new StandInGun(Id(), new CompoundItemTemplate { CanPutIntoDuringTheRaid = true, StackObjectsCount = 1, StackMaxSize = 1, Width = w, Height = h, Slots = new Slot[0], Grids = new Grid[0] });
         }
 
         public static Vest Rig(bool blocksArmor, params (int w, int h)[] grids)

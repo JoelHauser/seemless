@@ -60,7 +60,23 @@ namespace SeamlessSwap.Harness
 
             var harmony = new Harmony("com.joelhauser.seamlessswap.harness");
             harmony.PatchAll(typeof(SlotViewCanAcceptPatch));
-            harmony.PatchAll(typeof(SlotViewAcceptItemPatch));
+            harmony.PatchAll(typeof(SlotViewAcceptItemPatch)); harmony.PatchAll(typeof(Curtain.SearchableItemViewShowPatch)); harmony.PatchAll(typeof(Immediate.ExecutePatch)); Console.WriteLine("  applied Immediate.ExecutePatch on SinglePlayerInventoryController.Execute"); Console.WriteLine("  applied Curtain.SearchableItemViewShowPatch on SearchableItemView.Show"); 
+            if (File.Exists(Path.Combine(dir, "BackpackGunSlot.dll")))
+            {
+                Assembly.LoadFrom(Path.Combine(dir, "BackpackGunSlot.dll"));
+            }
+            if (AccessTools.TypeByName("BackpackGunSlot.BackpackSlotBinding") != null)
+            {
+                SeamlessSwapPlugin.Log = BepInEx.Logging.Logger.CreateLogSource("harness");
+                BackpackGunSlotGuard.Apply(harmony);
+                var place = AccessTools.Method(AccessTools.TypeByName("BackpackGunSlot.BackpackSlotBinding"), "PlaceSlot");
+                var guarded = Harmony.GetPatchInfo(place)?.Prefixes.Any(p => p.PatchMethod.DeclaringType == typeof(BackpackGunSlotGuard)) == true;
+                Console.WriteLine("  BackpackGunSlot PlaceSlot guarded: " + guarded);
+                if (!guarded)
+                {
+                    Program.CompatFailures++;
+                }
+            }
 
             foreach (var method in new MethodBase[]
             {

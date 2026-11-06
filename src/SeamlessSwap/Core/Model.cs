@@ -129,9 +129,15 @@ namespace SeamlessSwap.Core
         public long NodesVisited { get; }
         /// <summary>True when items already in the incoming container had to move.</summary>
         public bool RearrangedIncoming { get; }
+        /// <summary>
+        /// The same items packed tidily, or null when no tidy layout was found. Preferred over Placements,
+        /// which stay as the layout that moves the least, for when this one can't be reached.
+        /// </summary>
+        public IReadOnlyDictionary<string, Placement> Organized { get; }
 
-        public ArrangementResult(ArrangementStatus status, IReadOnlyDictionary<string, Placement> placements, IReadOnlyList<string> restrictedItems, long nodesVisited, bool rearrangedIncoming)
+        public ArrangementResult(ArrangementStatus status, IReadOnlyDictionary<string, Placement> placements, IReadOnlyList<string> restrictedItems, long nodesVisited, bool rearrangedIncoming, IReadOnlyDictionary<string, Placement> organized = null)
         {
+            Organized = organized;
             Status = status;
             Placements = placements;
             RestrictedItems = restrictedItems;

@@ -24,10 +24,14 @@ Labels: **[verified]** read in code and exercised by a test against the real cla
 So: a postfix on `SlotView.CanAccept` answers yes for the exact gesture (reference checks only: no
 search, no simulation, no notification); a prefix on `SlotView.AcceptItem` runs the swap and skips the
 original. A refused swap therefore can't fall through to any other handling. Gesture
-(`Game/Gesture.cs`): target is the local player's own `Backpack` or `TacticalVest` slot holding an
-item with grids; source is the same slot ID on an `InventoryEquipment` owned by a
-`CorpseItemController` (**[read]** `Corpse.Init` always creates one); UI Fixes multi-select empty;
-bypass key up.
+(`Game/Gesture.cs`): a drag between the local player's own `Backpack` or `TacticalVest` slot and the
+same slot ID on an `InventoryEquipment` owned by a `CorpseItemController` (**[read]** `Corpse.Init`
+always creates one), in either direction, both slots holding an item with grids; UI Fixes multi-select
+empty; bypass key up. `Gesture.Resolve` turns either direction into the same pair (your slot, the body's
+container), so nothing after it knows which way the drag went. **[read]** The body's slots hold your
+controller, not the corpse's (`ItemsPanel.Show` hands it to `ComplexStashPanel`), and
+`SearchableSlotView` overrides neither patched method. **[read]** `ItemView.CanDrag` refuses an
+unsearched item, so only the reverse direction can reach the search refusal for the body's container.
 
 ## 2. Operation order and why
 
@@ -36,7 +40,19 @@ two items; `MoveResult` moves one. The sequence is therefore:
 
 1. Validate, snapshot, solve (worker thread, plain data), plan moves, revalidate, **dry run**.
 2. Native `Swap` (incoming → your slot, yours → the body's slot), contents still inside.
-3. Single native `Move`s, one per frame, from your old container into the new one.
+   **[read]** The swap and the moves skip `SinglePlayerInventoryController.ExecuteAsync`'s yield (prefix
+   calling `method_43`, its own base call), and with nothing in hands every step of an operation completes
+   inline (`AsyncWorker.RunInMainTread` runs inline on the main thread), so the whole swap lands inside
+   one frame and no half-done state is drawn. An operation that finishes late is waited for, plus a frame.
+3. Native `Move`s in rounds, each round asking for every move the game will take right now, so they
+   land together instead of visibly streaming across. **[read]** UI Fixes' multi-item quick move hands
+   the game a row of moves too (`MultiSelectPatches`). **[read]**
+   `SinglePlayerInventoryController.ExecuteAsync` yields once per operation, so a round runs in order
+   on the next frame, and `MoveResult.Execute` works each move out again then. **[verified]** Each
+   queued operation registers an active event, and `CheckItemAction` calls a move into a queued move's
+   cells busy; `CanExecute` shows that, and a simulated `Move` shows an occupied target. Such a move
+   waits a round. Parking moves and an item's second move keep the plan's order. **[read]** The game's
+   own one-operation `ItemManipulator.Sort` isn't an option: `IsAllowedToSort` is false in raid.
 4. Repair hotkeys and tags that verifiably need it.
 
 Reasons, each checked:
@@ -81,7 +97,8 @@ The swap itself is checked by the game's simulated `Swap`, not executed, because
 largest, then id), each grid separate, rotation where the item isn't square, grid item limits, fixed
 items. Pruning: per-item zero options; cells no remaining item can reach; exact memo of failed states.
 Value order: the item's current position, then the smallest pocket that holds it. Stage A keeps every
-item already in the incoming container in place; stage B lets them move. Results: Found / Impossible
+item already in the incoming container in place; stage B lets them move. A third search then builds the
+tidy layout (`Organized`), which is used only if it has a move order and passes the dry run. Results: Found / Impossible
 (only from an exhaustive stage B) / BudgetExhausted (150 000 nodes, deterministic) / Restricted.
 A hard infeasible case (twelve 2x2s in a 7x7) is refuted in about 30 000 nodes, 0.2 s, on a worker
 thread. `Core/MovePlanner.cs` orders the moves and parks an item in free space when items block each

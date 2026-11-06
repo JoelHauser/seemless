@@ -19,7 +19,7 @@ namespace SeamlessSwap.Game
     {
         private static bool _active;
 
-        internal static async Task Start(SlotView view, Slot target, Item dragged, Player.PlayerInventoryController controller, SwapKind kind)
+        internal static async Task Start(SlotView view, Slot mySlot, CompoundItem incoming, Player.PlayerInventoryController controller, SwapKind kind)
         {
             if (_active)
             {
@@ -30,7 +30,8 @@ namespace SeamlessSwap.Game
             _active = true;
             try
             {
-                var gateway = new GameGateway(target, (CompoundItem)dragged, controller, kind, new LiveEnvironment(view, controller));
+                var gateway = new GameGateway(mySlot, incoming, controller, kind, new LiveEnvironment(view, controller));
+                Curtain.Draw(mySlot.ContainedItem as CompoundItem);
                 await new SwapCoordinator(gateway, kind).RunAsync();
             }
             catch (Exception ex)
@@ -39,6 +40,7 @@ namespace SeamlessSwap.Game
             }
             finally
             {
+                Curtain.Lift();
                 _active = false;
             }
         }
@@ -52,6 +54,10 @@ namespace SeamlessSwap.Game
     {
         bool ScreenOpen { get; }
         bool PlayerCanAct { get; }
+        /// <summary>Just before the first change: what the player sees now is where items animate from.</summary>
+        void BeforeSwap(CompoundItem incoming, CompoundItem outgoing, IEnumerable<Item> extras);
+        /// <summary>The swap is over: whatever the player sees of these two should match them.</summary>
+        void Settled(CompoundItem first, CompoundItem second);
         void Notify(string message);
         void Log(string message);
         void LogError(string message);
@@ -80,6 +86,18 @@ namespace SeamlessSwap.Game
                     && player.HealthController != null
                     && player.HealthController.IsAlive;
             }
+        }
+
+        public void BeforeSwap(CompoundItem incoming, CompoundItem outgoing, IEnumerable<Item> extras)
+        {
+            FillAnimation.Capture(incoming, outgoing);
+        }
+
+        public void Settled(CompoundItem first, CompoundItem second)
+        {
+            var root = _view != null ? _view.transform.root : null;
+            FillAnimation.Play(root, first);
+            ViewCheck.AfterSwap(root, first, second);
         }
 
         public void Notify(string message)
@@ -199,13 +217,13 @@ namespace SeamlessSwap.Game
             // Attached modules stay with their parent. Anything loose inside one would be left behind.
             foreach (var slot in _outgoing.AllSlots)
             {
-                if (slot.ContainedItem is CompoundItem module && module.GetAllItems().Any(i => i != module && i.Parent is GridItemAddress))
+                if (slot.ContainedItem is CompoundItem module && !(module is IWeapon) && module.GetAllItems().Any(i => i != module && i.Parent is GridItemAddress))
                 {
                     return "Empty the pouches attached to your current container before swapping.";
                 }
             }
 
-            foreach (var item in DirectContents(_outgoing))
+            foreach (var item in DirectContents(_outgoing).Concat(CarriedGuns()))
             {
                 var check = item.CheckAction(null);
                 if (check.Failed)
@@ -265,6 +283,23 @@ namespace SeamlessSwap.Game
             return container.Grids.SelectMany(g => g.Items);
         }
 
+        // Guns carried on the bag itself, in the slot BackpackGunSlot adds. Unlike an attached pouch, these
+        // are the player's belongings and must not stay behind. Matched by type, not by slot name, because
+        // that mod's slot name is a setting, and with no reference to it nothing changes when it's absent.
+        private IEnumerable<Item> CarriedGuns()
+        {
+            return _outgoing.AllSlots.Select(slot => slot.ContainedItem).Where(item => item is IWeapon);
+        }
+
+        // The same slot on the new bag, if it can take this gun. It's often unable to: that mod's server
+        // half decides what each bag accepts by bag size, so a rifle won't go on a small pack.
+        private Slot NewSlotFor(Item gun)
+        {
+            string id = ((SlotItemAddress)gun.Parent).Slot.ID;
+            var slot = _incoming.AllSlots.FirstOrDefault(s => s.ID == id);
+            return slot != null && slot.ContainedItem == null && slot.CheckCompatibility(gun) ? slot : null;
+        }
+
         public ArrangementRequest BuildRequest()
         {
             CaptureOnce();
@@ -274,7 +309,20 @@ namespace SeamlessSwap.Game
             AddItems(items, seen, _incoming, ContainerSide.Incoming);
             AddItems(items, seen, _outgoing, ContainerSide.Outgoing);
 
-            return new ArrangementRequest(Copy(_incoming), Copy(_outgoing), items);
+            // A gun with no slot to go to is packed like any other item, so it needs a place to start from.
+            // Core only knows grids, so it gets a stand-in grid of its own that nothing else may use.
+            var outgoingGrids = Copy(_outgoing).ToList();
+            foreach (var gun in CarriedGuns().Where(g => NewSlotFor(g) == null))
+            {
+                var size = gun.CalculateCellSize();
+                var placement = new Placement(ContainerSide.Outgoing, outgoingGrids.Count, 0, 0, false);
+                outgoingGrids.Add(new GridSnapshot(size.X, size.Y));
+                var inIncoming = _incoming.Grids.Select(target => IsAllowed(gun, target)).ToArray();
+                bool isFixed = gun.PinLockState != EItemPinLockState.Free || gun.CheckAction(null).Failed;
+                items.Add(new ItemSnapshot(gun.Id, size.X, size.Y, placement, inIncoming, new bool[_outgoing.Grids.Length], isFixed));
+            }
+
+            return new ArrangementRequest(Copy(_incoming), outgoingGrids.ToArray(), items);
         }
 
         private static GridSnapshot[] Copy(CompoundItem container)
@@ -352,7 +400,7 @@ namespace SeamlessSwap.Game
             _bindings = _controller.Inventory.FastAccess.BoundItems.Where(pair => pair.Value != null && carried.Contains(pair.Value)).ToList();
 
             // Move clears tags on any compound item that changes owner (ItemManipulator.ResetTags).
-            _tags = DirectContents(_outgoing)
+            _tags = DirectContents(_outgoing).Concat(CarriedGuns())
                 .SelectMany(item => item.GetItemComponentsInChildren<TagComponent>(false))
                 .Where(tag => !tag.IsEmpty)
                 .Select(tag => new SavedTag(tag))
@@ -365,6 +413,15 @@ namespace SeamlessSwap.Game
             sb.Append(_target.ContainedItem?.Id).Append('|').Append(_source.ContainedItem?.Id).Append('|');
             sb.Append(_controller.ItemInHands?.Id).Append('|');
             sb.Append(_controller.Inventory.Equipment.GetSlot(EquipmentSlot.ArmorVest)?.ContainedItem?.Id).Append('|');
+            foreach (var gun in CarriedGuns())
+            {
+                sb.Append(gun.Id).Append(';');
+            }
+            foreach (var slot in _incoming.AllSlots)
+            {
+                sb.Append(slot.ContainedItem?.Id).Append(';');
+            }
+            sb.Append('|');
             foreach (var container in new[] { _incoming, _outgoing })
             {
                 for (int g = 0; g < container.Grids.Length; g++)
@@ -407,6 +464,22 @@ namespace SeamlessSwap.Game
             var markedKnown = new List<Item>();
             try
             {
+                foreach (var gun in CarriedGuns().ToList())
+                {
+                    var slot = NewSlotFor(gun);
+                    if (slot == null)
+                    {
+                        continue;
+                    }
+                    var fit = ItemManipulator.Move(gun, slot.CreateItemAddress(), _controller, false);
+                    if (fit.Failed)
+                    {
+                        Log($"Dry run refused the gun {gun.Id}: {fit.Error}");
+                        return DescribeMoveRefusal(fit.Error);
+                    }
+                    done.Push(fit.Value);
+                }
+
                 foreach (var step in steps)
                 {
                     var item = FindDirect(step.ItemId);
@@ -472,7 +545,7 @@ namespace SeamlessSwap.Game
                     }
                 }
             }
-            return null;
+            return CarriedGuns().FirstOrDefault(gun => gun.Id == id);
         }
 
         private ItemAddress AddressFor(in Placement placement)
@@ -489,7 +562,15 @@ namespace SeamlessSwap.Game
             {
                 return OperationOutcome.Failure(Describe(swap.Error));
             }
-            var result = await _controller.TryRunNetworkTransaction(swap);
+            _environment.BeforeSwap(_incoming, _outgoing, CarriedGuns().ToList());
+            var running = Run(swap);
+            bool late = !running.IsCompleted;
+            var result = await running;
+            if (late)
+            {
+                // Finished late, so this may be running inside its completion callback.
+                await NextFrame();
+            }
             if (result.Succeed)
             {
                 if (Singleton<GUISounds>.Instantiated)
@@ -513,50 +594,140 @@ namespace SeamlessSwap.Game
             return _target.ContainedItem == _incoming && _source.ContainedItem == _outgoing;
         }
 
-        public bool IsStepValid(in MoveStep step)
+        /// <summary>
+        /// Runs the moves in rounds, each round asking for every move the game will take right now, so
+        /// they land together and the player sees a change, not items streaming across. UI Fixes' multi-item
+        /// quick move hands the game a row of moves the same way. The local player's controller runs each
+        /// a frame later, in order; MoveResult.Execute works the move out again at that point.
+        ///
+        /// A move waits for a later round if its target is still occupied, which the simulated Move sees,
+        /// or overlaps a move already queued this round, which CanExecute sees: every queued operation
+        /// registers an active event, and ItemController.CheckItemAction calls that busy. Final targets
+        /// never overlap, so these can land in any order. A parking move, or an item's second move, is
+        /// different: the plan's order matters, so the round ends there and it runs first in the next.
+        /// </summary>
+        public async Task<OperationOutcome> ExecuteMovesAsync(IReadOnlyList<MoveStep> steps)
         {
-            var item = FindDirect(step.ItemId);
-            if (item == null || !(item.Parent is GridItemAddress at) || !IsAt(at, step.From))
+            var fitted = await MoveGunsToNewSlots();
+            if (!fitted.Succeeded)
             {
-                return false;
+                return fitted;
             }
-            // Simulated Move: the same answer the real call is about to give, freeing the item's own cells.
-            return ItemManipulator.Move(item, AddressFor(step.To), _controller, true).Succeeded;
+
+            var remaining = new List<MoveStep>(steps);
+            int rounds = 0;
+            while (remaining.Count > 0)
+            {
+                rounds++;
+                var running = new List<Task<IResult>>();
+                var waiting = new List<MoveStep>();
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                for (int i = 0; i < remaining.Count; i++)
+                {
+                    var step = remaining[i];
+                    bool ordered = step.ToScratch || !seen.Add(step.ItemId);
+                    if (ordered && i > 0)
+                    {
+                        waiting.AddRange(remaining.Skip(i));
+                        break;
+                    }
+
+                    var item = FindDirect(step.ItemId);
+                    if (item == null)
+                    {
+                        return OperationOutcome.Failure("Item is no longer available.");
+                    }
+                    var move = ItemManipulator.Move(item, AddressFor(step.To), _controller, true);
+                    if (move.Succeeded && move.Value.ItemsDestroyRequired)
+                    {
+                        return OperationOutcome.Failure("Move would destroy items.");
+                    }
+                    if (move.Failed || !move.Value.CanExecute(_controller))
+                    {
+                        waiting.Add(step);
+                        continue;
+                    }
+                    running.Add(Run(move));
+                }
+
+                if (running.Count == 0)
+                {
+                    return OperationOutcome.Failure("No move can run: " + remaining[0]);
+                }
+
+                var round = await Landed(running);
+                if (!round.Succeeded)
+                {
+                    return round;
+                }
+                remaining = waiting;
+            }
+            Log($"Moves: {steps.Count} in {rounds} rounds; rounds that waited for the game: {_late}.");
+            return OperationOutcome.Success;
         }
 
-        private bool IsAt(GridItemAddress address, in Placement placement)
+        private async Task<OperationOutcome> MoveGunsToNewSlots()
         {
-            var container = placement.Side == ContainerSide.Incoming ? _incoming : _outgoing;
-            var location = address.LocationInGrid;
-            return address.Grid == container.Grids[placement.Grid]
-                && location.x == placement.X
-                && location.y == placement.Y
-                && (location.r == ItemRotation.Vertical) == placement.Rotated;
+            var running = new List<Task<IResult>>();
+            foreach (var gun in CarriedGuns().ToList())
+            {
+                var slot = NewSlotFor(gun);
+                if (slot == null)
+                {
+                    continue;
+                }
+                var move = ItemManipulator.Move(gun, slot.CreateItemAddress(), _controller, true);
+                if (move.Failed)
+                {
+                    return OperationOutcome.Failure(Describe(move.Error));
+                }
+                running.Add(Run(move));
+            }
+            return running.Count == 0 ? OperationOutcome.Success : await Landed(running);
         }
 
-        public async Task<OperationOutcome> ExecuteMoveAsync(MoveStep step)
+        private async Task<OperationOutcome> Landed(List<Task<IResult>> running)
         {
-            var item = FindDirect(step.ItemId);
-            if (item == null)
+            // Normally every operation has already finished, in this frame, and nothing waits. One that
+            // didn't (something in hands, or another controller) is waited for, then a frame more, because
+            // this may then be resuming inside its completion callback.
+            if (!running.All(task => task.IsCompleted))
             {
-                return OperationOutcome.Failure("Item is no longer available.");
+                _late++;
+                await Task.WhenAll(running);
+                await NextFrame();
             }
-            var move = ItemManipulator.Move(item, AddressFor(step.To), _controller, true);
-            if (move.Failed)
+            foreach (var task in running)
             {
-                return OperationOutcome.Failure(move.Error.ToString());
+                var result = task.Result;
+                if (!result.Succeed)
+                {
+                    return OperationOutcome.Failure(DescribeResult(result));
+                }
             }
-            if (move.Value.ItemsDestroyRequired)
+            return OperationOutcome.Success;
+        }
+
+        private int _late;
+
+        // An operation of this mod's own, without the controller's one-frame wait (see Immediate).
+        private Task<IResult> Run(OperationResult operation)
+        {
+            Immediate.Next = true;
+            try
             {
-                return OperationOutcome.Failure("Move would destroy items.");
+                return _controller.TryRunNetworkTransaction(operation);
             }
-            var result = await _controller.TryRunNetworkTransaction(move);
-            return result.Succeed ? OperationOutcome.Success : OperationOutcome.Failure(DescribeResult(result));
+            finally
+            {
+                // Refused before reaching Execute: the next operation, whoever starts it, waits as usual.
+                Immediate.Next = false;
+            }
         }
 
         public int CountOutgoingContents()
         {
-            return _outgoing.Grids.Sum(g => g.Items.Count());
+            return _outgoing.Grids.Sum(g => g.Items.Count()) + CarriedGuns().Count();
         }
 
         public bool CanContinue()
@@ -580,6 +751,7 @@ namespace SeamlessSwap.Game
         {
             RestoreTags();
             RestoreBindings();
+            _environment.Settled(_incoming, _outgoing);
         }
 
         private void RestoreTags()

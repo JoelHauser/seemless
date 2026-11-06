@@ -6,7 +6,8 @@ Turn on F12 → Seamless Swap → Diagnostic logging. After each test, note the 
 
 Setup for most tests: offline raid, any map, kill a PMC or Scav wearing a backpack and a rig. Use
 the console or a second raid as needed. "Swap" below always means: open the body, drag its backpack
-(or rig) from its equipment panel onto your own occupied backpack (or rig) slot, and release.
+(or rig) from its equipment panel onto your own occupied backpack (or rig) slot, and release. Section D
+covers the opposite direction.
 
 ## A. Core
 
@@ -62,7 +63,42 @@ With all four (configuration 5), also:
 18. Open your backpack's window and the body's backpack window, then swap. Expect no stale or ghost
     items; report what the windows show.
 
-## D. Fika
+## D. Reverse direction
+
+19. **Mine onto theirs.** Repeat A1, A2, A4 and A7 dragging *your* backpack (or rig) onto the body's
+    occupied slot. Expect the same results: theirs equipped on you with both sets of items, the same
+    messages, and Control giving normal behavior.
+20. **Unsearched, reverse.** Drag yours onto the body's unsearched backpack. Expect "Search both
+    containers before swapping."; nothing changed; the search isn't started.
+21. **Empty body slot.** Drag yours onto a body's empty slot. Expect the normal game move, contents
+    staying in the bag.
+
+22. **Organized.** Leave gaps in both bags, then swap. Expect one tidy block: largest items at the top
+    left, small pockets filled first, nothing rotated that didn't need to be. Report how it looks.
+23. **Almost full.** Swap into a bag with barely enough room. Expect the swap to happen even if the
+    result is less tidy; it may keep the plain layout.
+
+24. **Gun on your pack, same class.** With BackpackGunSlot, swap to a pack that accepts your on-pack gun.
+    Expect the gun on the new pack's ON PACK slot, and the slot redrawn correctly.
+25. **Gun too big for the new slot.** Swap a rifle on a big pack to a small one. Expect the rifle in the
+    bag's grid, or "Not enough space…" and nothing changed if it won't fit.
+26. **Body's gun.** Swap to a pack that already has a gun on it, with your own on yours. Expect theirs
+    still on the pack and yours in the grid.
+
+27. **Flip rigs repeatedly.** Swap a full rig back and forth on one body, 20 or more times, in pockets of
+    mixed sizes. Expect no items drawn on top of each other. Attach the log either way: any "stale image"
+    or "Moved the image" warning from Seamless Swap is what we need.
+
+28. **No flash.** Swap a full backpack. Expect no glimpse of your items in the old bag on the body. Then
+    interrupt a swap (close the inventory, or die) and expect what was left behind to be visible.
+
+29. **Fill animation.** Swap a full backpack at Fill speed 0.25, 1 and 4. Expect items to pop in top to
+    bottom, left to right, each with its drop sound. Close the inventory halfway through and reopen:
+    expect every item visible. With Fill animation off, expect an instant swap.
+30. **ON PACK gun.** With BackpackGunSlot, swap packs that both carry a gun, several times. Expect the ON
+    PACK slot to stay drawn, and no "Backpack slot placement failed" in the log.
+
+## E. Fika
 
 With Fika installed, drag a body's backpack onto yours. Expect one notice that Seamless Swap is off, and
 normal behavior. Nothing else is supported.
@@ -76,6 +112,6 @@ normal behavior. Nothing else is supported.
 | UI Fixes | |
 | Pack 'n' Strap | |
 | WTT CommonLib | |
-| Seamless Swap | 0.0.1 |
+| Seamless Swap | 1.0.0 |
 
 Seamless Swap is not release-ready until section A and configuration 5 of section C pass.
